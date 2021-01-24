@@ -44,20 +44,20 @@
 VideoWidget::VideoWidget(GUI::Window& window, NonnullRefPtr<Audio::ClientConnection> connection)
     : m_window(window)
     , m_connection(connection)
-    , m_buffer_thread(LibThread::Thread::construct([this] { return buffer_thread(); }, "VideoPlayer[buffer]"))
+    , m_video_thread(LibThread::Thread::construct([this] { return video_thread(); }, "VideoPlayer[video]"))
 {
     set_fill_with_background_color(false);
     m_frame_timer = Core::Timer::construct(0, [this]() { on_frame_timer(); });
     m_frame_timer->stop();
     m_seek_debounce_timer = Core::Timer::construct(0, [this]() { on_seek_debounce_timer(); });
     m_seek_debounce_timer->stop();
-    m_buffer_thread->start();
+    m_video_thread->start();
 }
 
 VideoWidget::~VideoWidget()
 {
     m_state = State::Teardown;
-    (void)m_buffer_thread->join();
+    (void)m_video_thread->join();
 }
 
 void VideoWidget::play()
@@ -82,10 +82,9 @@ void VideoWidget::reset_buffers()
 {
     // FIXME: This is stupid, perhaps replace with condvar or have the buffer loop spin up a new event loop to handle
     // commands, but for now it makes the thread synchronisation easier.
-    while (!m_buffer_thread_waiting) { }
+    while (!m_video_thread_waiting) { }
 
     m_next_frame_to_buffer = 0;
-    m_next_sample_to_buffer = 0;
     m_buffer_percent = 0;
     m_initial_buffer_full = false;
     if (m_video_buffer)
@@ -106,7 +105,6 @@ void VideoWidget::stop()
 
     m_last_frame = nullptr;
     m_played_frames = 0;
-    m_played_samples = 0;
     m_elapsed_time = 0;
 
     update();
@@ -154,15 +152,16 @@ void VideoWidget::open_file(String path)
 
     m_total_time = m_file->duration();
 
-    auto frame_pitch = Gfx::Bitmap::minimum_pitch(m_file->frame_size().width(), Gfx::BitmapFormat::RGBA32);
-    auto frame_bytes = Gfx::Bitmap::size_in_bytes(frame_pitch, m_file->frame_size().height());
     auto buffer_frames = min(VIDEOPLAYER_BUFFER_TIME / m_file->ms_per_frame(), m_file->frame_count());
 
-    auto audio_sample_bytes = m_file->audio_sample_bytes();
-    auto buffer_audio_samples = min(VIDEOPLAYER_BUFFER_TIME * m_file->audio_samples_per_ms(), m_file->audio_sample_count());
+    dbgln("Ring buffers initialized for {} frames", buffer_frames);
 
+    auto frame_pitch = Gfx::Bitmap::minimum_pitch(m_file->frame_size().width(), Gfx::BitmapFormat::RGBA32);
+    auto frame_bytes = Gfx::Bitmap::size_in_bytes(frame_pitch, m_file->frame_size().height());
     m_video_buffer = new RingBuffer(buffer_frames, frame_bytes);
-    m_audio_buffer = new RingBuffer(buffer_audio_samples, audio_sample_bytes);
+
+    auto samples_per_frame = m_file->audio_samples_per_frame();
+    m_audio_buffer = new RingBuffer(buffer_frames, sizeof(Audio::Sample) * samples_per_frame);
 }
 
 void VideoWidget::paint_event(GUI::PaintEvent& event)
@@ -234,22 +233,55 @@ void VideoWidget::on_frame_timer()
         ASSERT(m_last_frame->size_in_bytes() == frame->size_in_bytes());
         memcpy(m_last_frame->scanline(0), frame->scanline(0), frame->size_in_bytes());
     }
-
     m_video_buffer->pop();
+
+    auto sample_data = reinterpret_cast<const Audio::Sample*>(m_audio_buffer->try_peek());
+    if (sample_data) {
+        Vector<Audio::Sample> samples;
+        samples.ensure_capacity(m_file->audio_samples_per_frame());
+        for (u32 i = 0; i < m_file->audio_samples_per_frame(); i++)
+            samples.append(sample_data[i]);
+        auto buffer = Audio::Buffer::create_with_samples(move(samples));
+        m_connection->try_enqueue(*buffer);
+        m_audio_buffer->pop();
+    }
+
+    // int id = m_connection->get_playing_buffer();
+    // dbgln("playing buffer: {}", id);
+
+    // int current_id = -1;
+    // if (m_current_audio_buffer) {
+    //     current_id = m_current_audio_buffer->id();
+    //     dbgln("had a current buffer, it's id is {}", current_id);
+    // }
+
+    // if (id >= 0 && id != current_id) {
+    //     while (!m_audio_buffers.is_empty()) {
+    //         LOCKER(m_audio_buffers_lock);
+    //         --m_next_audio_buffer_ptr;
+    //         auto buffer = m_audio_buffers.take_first();
+
+    //         if (buffer->id() == id) {
+    //             m_current_audio_buffer = buffer;
+    //             dbgln("setting current audio buffer");
+    //             break;
+    //         }
+    //     }
+    // }
+
+    // if (m_next_audio_buffer) {
+    //     dbgln("m_next_audio_buffer size_in_bytes={}, sample_count={}", m_next_audio_buffer->size_in_bytes(), m_next_audio_buffer->sample_count());
+    //     m_connection->try_enqueue(*m_next_audio_buffer);
+    // }
+
     m_played_frames++;
     m_elapsed_time += m_file->ms_per_frame();
 
     update();
 }
 
-int VideoWidget::buffer_thread()
+int VideoWidget::video_thread()
 {
-    auto device = Core::File::construct("/dev/audio", this);
-    if (!device->open(Core::IODevice::WriteOnly)) {
-        dbgln("Can't open audio device: {}", device->error_string());
-        return 1;
-    }
-
     for (;;) {
         auto current_state = m_state.load();
 
@@ -257,32 +289,20 @@ int VideoWidget::buffer_thread()
         case State::Teardown:
             return 0;
         case State::Stopped:
-            m_buffer_thread_waiting = true;
+            m_video_thread_waiting = true;
             break;
         case State::Playing:
-            // // FIXME: Dumb
-            // while (!m_audio_buffer->is_empty()) {
-            //     auto* sample = (const AudioDecoder::Sample*)m_audio_buffer->try_peek();
-            //     device->write((const u8*)sample, sizeof(AudioDecoder::Sample));
-            // }
-            [[fallthrough]];
         case State::Paused:
-            m_buffer_thread_waiting = false;
-            while ((!m_video_buffer->is_full() || !m_audio_buffer->is_full()) && (current_state == State::Playing || current_state == State::Paused)) {
-                if (!m_video_buffer->is_full()) {
-                    auto frame = m_file->frame(m_next_frame_to_buffer);
-                    if (frame) {
-                        m_next_frame_to_buffer++;
-                        m_video_buffer->push(frame->scanline_u8(0));
-                    }
+            m_video_thread_waiting = false;
+            while (!m_video_buffer->is_full() && (current_state == State::Playing || current_state == State::Paused)) {
+                auto frame = m_file->frame(m_next_frame_to_buffer);
+                if (frame) {
+                    m_video_buffer->push(frame->scanline_u8(0));
+                    auto samples = m_file->decode_audio_samples(m_next_frame_to_buffer);
+                    m_audio_buffer->push(const_cast<u8*>(reinterpret_cast<const u8*>(samples.data())));
+                    m_next_frame_to_buffer++;
+                    m_buffer_percent = (float)m_video_buffer->size() / (float)m_video_buffer->capacity() * 100.f;
                 }
-                if (!m_audio_buffer->is_full()) {
-                    auto sample = m_file->decode_audio_sample(m_next_sample_to_buffer++);
-                    sample.left *= 1800;
-                    sample.right *= 1800;
-                    m_audio_buffer->push((u8*)&sample);
-                }
-                m_buffer_percent = (float)m_video_buffer->size() / (float)m_video_buffer->capacity() * 100.f;
                 current_state = m_state.load();
             }
             break;
@@ -292,3 +312,28 @@ int VideoWidget::buffer_thread()
         usleep(1000);
     }
 }
+
+// void VideoWidget::load_next_audio_buffer()
+// {
+//     dbgln("load_next_audio_buffer");
+//     if (m_audio_buffers.size() < 10) {
+//         for (int i = 0; i < 20 && m_next_audio_frame_to_buffer < m_file->frame_count(); i++) {
+//             auto buffer = m_file->decode_audio_samples(m_next_audio_frame_to_buffer++);
+//             if (buffer) {
+//                 dbgln("decoded {} samples", buffer->sample_count());
+//                 LOCKER(m_audio_buffers_lock);
+//                 m_audio_buffers.append(buffer);
+//                 dbgln("there are now {} audio buffers", m_audio_buffers.size());
+//             }
+//         }
+//     }
+
+//     LOCKER(m_audio_buffers_lock);
+//     if (m_next_audio_buffer_ptr < m_audio_buffers.size()) {
+//         dbgln("setting m_next_audio_buffer to index {}", m_next_audio_buffer_ptr);
+//         m_next_audio_buffer = m_audio_buffers.at(m_next_audio_buffer_ptr++);
+//     } else {
+//         dbgln("setting m_next_audio_buffer to nullptr", m_next_audio_buffer_ptr);
+//         m_next_audio_buffer = nullptr;
+//     }
+// }

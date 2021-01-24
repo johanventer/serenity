@@ -75,10 +75,11 @@ private:
     virtual void paint_event(GUI::PaintEvent&) override;
 
     void on_frame_timer();
-    void on_update_timer();
+    void on_audio_timer();
     void on_seek_debounce_timer();
-    int buffer_thread();
+    int video_thread();
     void reset_buffers();
+    // void load_next_audio_buffer();
 
     GUI::Window& m_window;
     NonnullRefPtr<Audio::ClientConnection> m_connection;
@@ -87,9 +88,8 @@ private:
     u32 m_initial_buffer_full { 0 };
     Atomic<u32> m_buffer_percent { 0 };
     u32 m_played_frames { 0 };
-    u32 m_played_samples { 0 };
     u32 m_next_frame_to_buffer { 0 };
-    u32 m_next_sample_to_buffer { 0 };
+    // u32 m_next_audio_frame_to_buffer { 0 };
     u32 m_elapsed_time { 0 };
     u32 m_total_time { 0 };
     u32 m_frame_to_seek_to { 0 };
@@ -99,8 +99,8 @@ private:
     OwnPtr<RingBuffer> m_video_buffer { nullptr };
     OwnPtr<RingBuffer> m_audio_buffer { nullptr };
 
-    NonnullRefPtr<LibThread::Thread> m_buffer_thread;
-    Atomic<bool> m_buffer_thread_waiting { true };
+    NonnullRefPtr<LibThread::Thread> m_video_thread;
+    Atomic<bool> m_video_thread_waiting { true };
 
     RefPtr<Core::Timer> m_frame_timer;
     RefPtr<Core::Timer> m_seek_debounce_timer;

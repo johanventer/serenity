@@ -52,12 +52,12 @@ public:
     u32 duration() const;
     u32 frame_count() const;
     u32 ms_per_frame() const;
-    u32 audio_sample_bytes() const;
-    u32 audio_samples_per_ms() const;
     u32 audio_sample_count() const;
+    u32 audio_samples_per_frame() const;
+    u32 audio_sample_size() const;
 
     RefPtr<Gfx::Bitmap> frame(u32);
-    AudioDecoder::Sample decode_audio_sample(u32);
+    Vector<Audio::Sample> decode_audio_samples(u32 frame_index);
 
 private:
     enum class TrackType {
@@ -140,14 +140,13 @@ private:
 
     void create_video_decoder();
     void create_audio_decoder();
-    u32 time_from_ms(u32) const;
-    u32 sample_at_time(const Track*, u32) const;
-    u32 chunk_for_sample(const Track*, u32) const;
+    u32 sample_index_at_time(const Track*, u32) const;
+    u32 chunk_index_for_sample(const Track*, u32) const;
+    const SampleToChunkEntry& chunk_entry_for_sample(const Track*, u32) const;
     u32 offset_for_chunk(const Track*, u32) const;
     u32 first_sample_in_chunk(const Track*, u32) const;
     u32 sample_offset_in_chunk(const Track*, u32 chunk, u32 sample) const;
     u32 size_for_sample(const Track*, u32) const;
-    size_t sample_offset_in_file(const Track*, u32 sample) const;
 
     NonnullRefPtr<MappedFile> m_file;
     OwnPtr<InputMemoryStream> m_stream;

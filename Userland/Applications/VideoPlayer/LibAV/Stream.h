@@ -24,28 +24,20 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#pragma once
+#include <AK/RefCounted.h>
+#include <AK/RefPtr.h>
 
-#include "AudioDecoder.h"
-#include <AK/Format.h>
-
-class TwosAudioDecoder : public AudioDecoder {
+template<typename StreamMeta>
+class Stream : public RefCounted<Stream<StreamMeta>> {
 public:
-    TwosAudioDecoder(int bits_per_sample, int sample_rate, int channels)
-        : AudioDecoder(bits_per_sample, sample_rate, channels) {};
-
-    virtual Audio::Sample decode_sample(ReadonlyBytes input) override
+protected:
+    Stream(StreamMeta& meta)
+        : m_data(meta)
     {
-        ASSERT(input.size() == (size_t)(m_bits_per_sample / 8 * m_channels));
-        ASSERT(m_bits_per_sample == 16);
-        ASSERT(m_channels == 2);
-
-        i16 left = input.data()[0] << 8 | input.data()[1];
-        i16 right = input.data()[2] << 8 | input.data()[3];
-
-        return {
-            -1.0 + 2.0 * (((double)left + 32768.0) / 65535.0),
-            -1.0 + 2.0 * (((double)right + 32768.0) / 65535.0),
-        };
     }
+    virtual ~Stream() = default;
+
+private:
+    StreamMeta& m_data;
+    size_t m_frame_offset { 0 };
 };

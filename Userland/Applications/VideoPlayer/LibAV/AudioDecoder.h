@@ -26,28 +26,33 @@
 
 #pragma once
 
+#include <AK/Format.h>
 #include <AK/RefCounted.h>
 #include <AK/Span.h>
+#include <LibAudio/Buffer.h>
 
 class AudioDecoder : public RefCounted<AudioDecoder> {
 public:
-    struct Sample {
-        i16 left;
-        i16 right;
-    };
-
     virtual ~AudioDecoder() = default;
-    virtual Sample decode_sample(ReadonlyBytes src) = 0;
+    virtual Audio::Sample decode_sample(ReadonlyBytes input) = 0;
 
 protected:
-    AudioDecoder(int sample_size, int channels)
-        : m_sample_size(sample_size)
+    AudioDecoder(int bits_per_sample, int sample_rate, int channels)
+        : m_bits_per_sample(bits_per_sample)
+        , m_sample_rate(sample_rate)
         , m_channels(channels)
     {
         // FIXME: Only supports 16 bits per sample right now
-        ASSERT(m_sample_size == 2);
+        ASSERT(m_bits_per_sample == 16);
+
+        // FIXME: Only supports 44100Hz right now
+        ASSERT(m_sample_rate == 44100);
+
+        // FIXME: Only stereo right
+        ASSERT(m_channels == 2);
     }
 
-    int m_sample_size { 0 };
+    int m_bits_per_sample { 0 };
+    int m_sample_rate { 0 };
     int m_channels { 0 };
 };

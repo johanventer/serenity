@@ -613,40 +613,39 @@ u32 MOVFile::frame_count() const
     return 0;
 }
 
-u32 MOVFile::ms_per_frame() const
-{
-    return (float)duration() / (float)frame_count();
-}
-
-u32 MOVFile::audio_sample_bytes() const
+u32 MOVFile::audio_sample_count() const
 {
     auto track = audio_track();
-
     if (track)
-        return track->sample_description.sample_size / 8;
+        return track->sample_count;
 
     return 0;
 }
 
-u32 MOVFile::audio_samples_per_ms() const
+u32 MOVFile::audio_samples_per_frame() const
 {
     auto track = audio_track();
-
     if (track) {
-        return track->sample_description.sample_rate / 1000;
+        auto samples_per_ms = ceilf((float)track->sample_description.sample_rate / 1000.f);
+        return ms_per_frame() * samples_per_ms;
     }
 
     return 0;
 }
 
-u32 MOVFile::audio_sample_count() const
+u32 MOVFile::audio_sample_size() const
 {
     auto track = audio_track();
-
-    if (track)
-        return track->sample_count;
+    if (track) {
+        return track->sample_description.sample_size / 8 * track->sample_description.channels;
+    }
 
     return 0;
+}
+
+u32 MOVFile::ms_per_frame() const
+{
+    return (float)duration() / (float)frame_count();
 }
 
 void MOVFile::create_video_decoder()
@@ -678,7 +677,7 @@ void MOVFile::create_audio_decoder()
     if (track) {
         switch (track->sample_description.format) {
         case ATOM_TYPE('t', 'w', 'o', 's'):
-            m_audio_decoder = adopt(*new TwosAudioDecoder(track->sample_description.sample_size / 8, track->sample_description.channels));
+            m_audio_decoder = adopt(*new TwosAudioDecoder(track->sample_description.sample_size, track->sample_description.sample_rate, track->sample_description.channels));
             return;
 #ifdef DEBUG_MOV
             StringView format_str { reinterpret_cast<const char*>(&track->sample_description.format), 4 };
@@ -691,7 +690,7 @@ void MOVFile::create_audio_decoder()
     m_error_string = "Could not create audio decoder";
 }
 
-u32 MOVFile::sample_at_time(const Track* track, u32 time) const
+u32 MOVFile::sample_index_at_time(const Track* track, u32 time) const
 {
     u32 total_time = 0;
     u32 sample_index = 0;
@@ -717,7 +716,7 @@ u32 MOVFile::sample_at_time(const Track* track, u32 time) const
     return UINT32_MAX;
 }
 
-u32 MOVFile::chunk_for_sample(const Track* track, u32 sample_index) const
+u32 MOVFile::chunk_index_for_sample(const Track* track, u32 sample_index) const
 {
     // FIXME: Precompute this
 
@@ -728,11 +727,7 @@ u32 MOVFile::chunk_for_sample(const Track* track, u32 sample_index) const
         auto& entry = track->sample_to_chunk_entries[i];
         u32 chunk_count = entry.chunk_count;
 
-        // dbgln("looking for sample: {}, entry: {}, chunks: {}, last_sample_index: {}, samples_per_chunk: {}", sample_index, i, chunks, last_sample_index, entry.samples_per_chunk);
-
         do {
-            // dbgln("  chunk_index: {}, chunks: {}, last_sample_index: {}, entry.samples_per_chunk: {}, sample_index: {}", chunk_index, chunks, last_sample_index, entry.samples_per_chunk, sample_index);
-
             if (last_sample_index + entry.samples_per_chunk > sample_index)
                 return chunk_index;
 
@@ -742,6 +737,27 @@ u32 MOVFile::chunk_for_sample(const Track* track, u32 sample_index) const
     }
 
     return UINT32_MAX;
+}
+
+const MOVFile::SampleToChunkEntry& MOVFile::chunk_entry_for_sample(const Track* track, u32 sample_index) const
+{
+    // FIXME: Precompute this
+
+    u32 last_sample_index = 0;
+
+    for (size_t i = 0; i < track->sample_to_chunk_entries.size(); i++) {
+        auto& entry = track->sample_to_chunk_entries[i];
+        u32 chunk_count = entry.chunk_count;
+
+        do {
+            if (last_sample_index + entry.samples_per_chunk > sample_index)
+                return track->sample_to_chunk_entries[i];
+
+            last_sample_index += entry.samples_per_chunk;
+        } while (--chunk_count);
+    }
+
+    ASSERT_NOT_REACHED();
 }
 
 u32 MOVFile::offset_for_chunk(const Track* track, u32 chunk_index) const
@@ -791,33 +807,6 @@ u32 MOVFile::size_for_sample(const Track* track, u32 sample_index) const
     return track->sample_size_entries[sample_index];
 }
 
-size_t MOVFile::sample_offset_in_file(const Track* track, u32 sample_index) const
-{
-    auto chunk_index = chunk_for_sample(track, sample_index);
-    if (chunk_index == UINT32_MAX)
-        return UINT32_MAX;
-
-    // dbgln("HERE2 chunk_index: {}", chunk_index);
-
-    auto chunk_offset = offset_for_chunk(track, chunk_index);
-    if (chunk_offset == UINT32_MAX)
-        return UINT32_MAX;
-
-    // dbgln("HERE3 chunk_offset: {}", chunk_offset);
-
-    auto offset_in_chunk = sample_offset_in_chunk(track, chunk_index, sample_index);
-    if (offset_in_chunk == UINT32_MAX)
-        return UINT32_MAX;
-
-    // dbgln("HERE4 offset_in_chunk: {}", offset_in_chunk);
-
-    auto offset_in_file = chunk_offset + offset_in_chunk;
-    if (offset_in_file > m_file->size() - 1)
-        return UINT32_MAX;
-
-    return offset_in_file;
-}
-
 RefPtr<Gfx::Bitmap> MOVFile::frame(u32 frame)
 {
     frame = min(frame, frame_count() - 1);
@@ -828,8 +817,20 @@ RefPtr<Gfx::Bitmap> MOVFile::frame(u32 frame)
 
     // FIXME: Use frames_per_sample to figure out sample index
 
-    auto offset_in_file = sample_offset_in_file(track, frame);
-    if (offset_in_file == UINT32_MAX)
+    auto chunk_index = chunk_index_for_sample(track, frame);
+    if (chunk_index == UINT32_MAX)
+        return nullptr;
+
+    auto chunk_offset = offset_for_chunk(track, chunk_index);
+    if (chunk_offset == UINT32_MAX)
+        return nullptr;
+
+    auto offset_in_chunk = sample_offset_in_chunk(track, chunk_index, frame);
+    if (offset_in_chunk == UINT32_MAX)
+        return nullptr;
+
+    auto offset_in_file = chunk_offset + offset_in_chunk;
+    if (offset_in_file > m_file->size() - 1)
         return nullptr;
 
     auto sample_size = size_for_sample(track, frame);
@@ -844,24 +845,54 @@ RefPtr<Gfx::Bitmap> MOVFile::frame(u32 frame)
     return nullptr;
 }
 
-AudioDecoder::Sample MOVFile::decode_audio_sample(u32 sample_index)
+Vector<Audio::Sample> MOVFile::decode_audio_samples(u32 frame_index)
 {
+    Vector<Audio::Sample> samples;
+
     auto track = audio_track();
 
-    if (!track)
-        return { 0, 0 };
+    ASSERT(track);
+    ASSERT(frame_index < frame_count());
 
-    sample_index = min(sample_index, track->sample_count);
+    auto samples_per_frame = audio_samples_per_frame();
+    auto first_sample_index = min(frame_index * samples_per_frame, audio_sample_count() - 1);
+    auto last_sample_index = min(first_sample_index + samples_per_frame - 1, audio_sample_count() - 1);
 
-    auto offset_in_file = sample_offset_in_file(track, sample_index);
-    if (offset_in_file == UINT32_MAX)
-        return { 0, 0 };
+    samples.ensure_capacity(samples_per_frame);
 
-    if (m_audio_decoder) {
-        auto span = ReadonlyBytes { (const u8*)m_file->data() + offset_in_file, track->sample_size };
-        return m_audio_decoder->decode_sample(span);
+    for (auto sample_index = first_sample_index; sample_index <= last_sample_index; sample_index++) {
+        Audio::Sample sample { 0, 0 };
+
+        auto chunk_index = chunk_index_for_sample(track, sample_index);
+        if (chunk_index == UINT32_MAX)
+            break;
+
+        auto chunk_offset = offset_for_chunk(track, chunk_index);
+        if (chunk_offset == UINT32_MAX)
+            break;
+
+        auto offset_in_chunk = sample_offset_in_chunk(track, chunk_index, sample_index);
+        if (offset_in_chunk == UINT32_MAX)
+            break;
+
+        auto offset_in_file = chunk_offset + offset_in_chunk;
+        if (offset_in_file > m_file->size() - 1)
+            break;
+
+        auto sample_size = size_for_sample(track, sample_index);
+
+        if (m_audio_decoder) {
+            auto span = ReadonlyBytes { (const u8*)m_file->data() + offset_in_file, sample_size };
+            sample = m_audio_decoder->decode_sample(span);
+        }
+
+        samples.append(sample);
     }
 
-    return { 0, 0 };
+    while (samples.size() < samples_per_frame) {
+        samples.append(Audio::Sample { 0, 0 });
+    }
+
+    return samples;
 }
 
