@@ -83,6 +83,12 @@ public:
         m_offset = offset;
     }
 
+    void seek_to_end()
+    {
+        m_offset = m_bytes.size();
+        ASSERT(eof());
+    }
+
     u8 peek_or_error() const
     {
         if (remaining() == 0) {
