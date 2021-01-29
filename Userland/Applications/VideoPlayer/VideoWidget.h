@@ -97,11 +97,11 @@ private:
     RefPtr<MOVFile> m_file { nullptr };
     RefPtr<Gfx::Bitmap> m_last_frame { nullptr };
     OwnPtr<RingBuffer> m_video_buffer { nullptr };
-    OwnPtr<RingBuffer> m_audio_buffer { nullptr };
 
     NonnullRefPtr<LibThread::Thread> m_video_thread;
     Atomic<bool> m_video_thread_waiting { true };
 
-    RefPtr<Core::Timer> m_frame_timer;
-    RefPtr<Core::Timer> m_seek_debounce_timer;
+    NonnullRefPtr<Core::Timer> m_frame_timer;
+    NonnullRefPtr<Core::Timer> m_audio_timer;
+    NonnullRefPtr<Core::Timer> m_seek_debounce_timer;
 };

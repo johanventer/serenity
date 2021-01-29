@@ -34,7 +34,7 @@
 class AudioDecoder : public RefCounted<AudioDecoder> {
 public:
     virtual ~AudioDecoder() = default;
-    virtual Audio::Sample decode_sample(ReadonlyBytes input) = 0;
+    virtual void decode_samples(const u8* src, u32 sample_count, Vector<Audio::Sample>& dest) = 0;
 
 protected:
     AudioDecoder(int bits_per_sample, int sample_rate, int channels)

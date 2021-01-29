@@ -45,11 +45,14 @@ VideoWidget::VideoWidget(GUI::Window& window, NonnullRefPtr<Audio::ClientConnect
     : m_window(window)
     , m_connection(connection)
     , m_video_thread(LibThread::Thread::construct([this] { return video_thread(); }, "VideoPlayer[video]"))
+    , m_frame_timer(Core::Timer::construct(0, [this]() { on_frame_timer(); }))
+    , m_audio_timer(Core::Timer::construct(100, [this]() { on_audio_timer(); }))
+    , m_seek_debounce_timer(Core::Timer::construct(0, [this]() { on_seek_debounce_timer(); }))
+
 {
     set_fill_with_background_color(false);
-    m_frame_timer = Core::Timer::construct(0, [this]() { on_frame_timer(); });
     m_frame_timer->stop();
-    m_seek_debounce_timer = Core::Timer::construct(0, [this]() { on_seek_debounce_timer(); });
+    m_audio_timer->stop();
     m_seek_debounce_timer->stop();
     m_video_thread->start();
 }
@@ -67,6 +70,7 @@ void VideoWidget::play()
 
     m_state = State::Playing;
     m_frame_timer->start(m_file->ms_per_frame());
+    m_audio_timer->start();
 }
 
 void VideoWidget::pause()
@@ -75,6 +79,7 @@ void VideoWidget::pause()
         return;
 
     m_frame_timer->stop();
+    m_audio_timer->stop();
     m_state = State::Paused;
 }
 
@@ -89,8 +94,8 @@ void VideoWidget::reset_buffers()
     m_initial_buffer_full = false;
     if (m_video_buffer)
         m_video_buffer->reset();
-    if (m_audio_buffer)
-        m_audio_buffer->reset();
+    // if (m_audio_buffer)
+    //     m_audio_buffer->reset();
 }
 
 void VideoWidget::stop()
@@ -99,6 +104,7 @@ void VideoWidget::stop()
         return;
 
     m_frame_timer->stop();
+    m_audio_timer->stop();
     m_state = State::Stopped;
 
     reset_buffers();
@@ -110,23 +116,23 @@ void VideoWidget::stop()
     update();
 }
 
-void VideoWidget::seek_to_frame(u32 frame)
+void VideoWidget::seek_to_frame(u32)
 {
-    m_frame_to_seek_to = min(max(frame, 0u), m_file->frame_count() - 1);
+    // m_frame_to_seek_to = min(max(frame, 0u), m_file->frame_count() - 1);
 
-    m_frame_timer->stop();
-    m_state = State::Stopped;
+    // m_frame_timer->stop();
+    // m_state = State::Stopped;
 
-    reset_buffers();
+    // reset_buffers();
 
-    // FIXME: This is the dumbest seeking ever, it doesn't know anything about keyframes
-    m_next_frame_to_buffer = m_frame_to_seek_to;
-    // FIXME: Audio seeking
-    m_played_frames = m_frame_to_seek_to;
-    m_elapsed_time = m_frame_to_seek_to * m_file->ms_per_frame();
+    // // FIXME: This is the dumbest seeking ever, it doesn't know anything about keyframes
+    // m_next_frame_to_buffer = m_frame_to_seek_to;
+    // // FIXME: Audio seeking
+    // m_played_frames = m_frame_to_seek_to;
+    // m_elapsed_time = m_frame_to_seek_to * m_file->ms_per_frame();
 
-    m_seek_debounce_timer->stop();
-    m_seek_debounce_timer->start(500);
+    // m_seek_debounce_timer->stop();
+    // m_seek_debounce_timer->start(500);
 }
 
 void VideoWidget::on_seek_debounce_timer()
@@ -159,9 +165,6 @@ void VideoWidget::open_file(String path)
     auto frame_pitch = Gfx::Bitmap::minimum_pitch(m_file->frame_size().width(), Gfx::BitmapFormat::RGBA32);
     auto frame_bytes = Gfx::Bitmap::size_in_bytes(frame_pitch, m_file->frame_size().height());
     m_video_buffer = new RingBuffer(buffer_frames, frame_bytes);
-
-    auto samples_per_frame = m_file->audio_samples_per_frame();
-    m_audio_buffer = new RingBuffer(buffer_frames, sizeof(Audio::Sample) * samples_per_frame);
 }
 
 void VideoWidget::paint_event(GUI::PaintEvent& event)
@@ -235,16 +238,16 @@ void VideoWidget::on_frame_timer()
     }
     m_video_buffer->pop();
 
-    auto sample_data = reinterpret_cast<const Audio::Sample*>(m_audio_buffer->try_peek());
-    if (sample_data) {
-        Vector<Audio::Sample> samples;
-        samples.ensure_capacity(m_file->audio_samples_per_frame());
-        for (u32 i = 0; i < m_file->audio_samples_per_frame(); i++)
-            samples.append(sample_data[i]);
-        auto buffer = Audio::Buffer::create_with_samples(move(samples));
-        m_connection->try_enqueue(*buffer);
-        m_audio_buffer->pop();
-    }
+    // auto sample_data = reinterpret_cast<const Audio::Sample*>(m_audio_buffer->try_peek());
+    // if (sample_data) {
+    //     Vector<Audio::Sample> samples;
+    //     samples.ensure_capacity(m_file->audio_samples_per_frame());
+    //     for (u32 i = 0; i < m_file->audio_samples_per_frame(); i++)
+    //         samples.append(sample_data[i]);
+    //     auto buffer = Audio::Buffer::create_with_samples(move(samples));
+    //     m_connection->try_enqueue(*buffer);
+    //     m_audio_buffer->pop();
+    // }
 
     // int id = m_connection->get_playing_buffer();
     // dbgln("playing buffer: {}", id);
@@ -295,11 +298,9 @@ int VideoWidget::video_thread()
         case State::Paused:
             m_video_thread_waiting = false;
             while (!m_video_buffer->is_full() && (current_state == State::Playing || current_state == State::Paused)) {
-                auto frame = m_file->frame(m_next_frame_to_buffer);
+                auto frame = m_file->decode_frame(m_next_frame_to_buffer);
                 if (frame) {
                     m_video_buffer->push(frame->scanline_u8(0));
-                    auto samples = m_file->decode_audio_samples(m_next_frame_to_buffer);
-                    m_audio_buffer->push(const_cast<u8*>(reinterpret_cast<const u8*>(samples.data())));
                     m_next_frame_to_buffer++;
                     m_buffer_percent = (float)m_video_buffer->size() / (float)m_video_buffer->capacity() * 100.f;
                 }
@@ -313,27 +314,19 @@ int VideoWidget::video_thread()
     }
 }
 
-// void VideoWidget::load_next_audio_buffer()
-// {
-//     dbgln("load_next_audio_buffer");
-//     if (m_audio_buffers.size() < 10) {
-//         for (int i = 0; i < 20 && m_next_audio_frame_to_buffer < m_file->frame_count(); i++) {
-//             auto buffer = m_file->decode_audio_samples(m_next_audio_frame_to_buffer++);
-//             if (buffer) {
-//                 dbgln("decoded {} samples", buffer->sample_count());
-//                 LOCKER(m_audio_buffers_lock);
-//                 m_audio_buffers.append(buffer);
-//                 dbgln("there are now {} audio buffers", m_audio_buffers.size());
-//             }
-//         }
-//     }
+void VideoWidget::on_audio_timer()
+{
+    static u32 next_sample = 0;
+    static u32 samples_per_tick = 4410;
 
-//     LOCKER(m_audio_buffers_lock);
-//     if (m_next_audio_buffer_ptr < m_audio_buffers.size()) {
-//         dbgln("setting m_next_audio_buffer to index {}", m_next_audio_buffer_ptr);
-//         m_next_audio_buffer = m_audio_buffers.at(m_next_audio_buffer_ptr++);
-//     } else {
-//         dbgln("setting m_next_audio_buffer to nullptr", m_next_audio_buffer_ptr);
-//         m_next_audio_buffer = nullptr;
-//     }
-// }
+    if (!m_file)
+        return;
+
+    if (next_sample >= m_file->audio_sample_count())
+        return;
+
+    auto samples = m_file->decode_audio_samples(next_sample, samples_per_tick);
+    next_sample += samples.size();
+    auto buffer = Audio::Buffer::create_with_samples(move(samples));
+    m_connection->try_enqueue(*buffer);
+}

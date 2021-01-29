@@ -34,18 +34,24 @@ public:
     TwosAudioDecoder(int bits_per_sample, int sample_rate, int channels)
         : AudioDecoder(bits_per_sample, sample_rate, channels) {};
 
-    virtual Audio::Sample decode_sample(ReadonlyBytes input) override
+    virtual void decode_samples(const u8* src, u32 sample_count, Vector<Audio::Sample>& dst) override
     {
-        ASSERT(input.size() == (size_t)(m_bits_per_sample / 8 * m_channels));
         ASSERT(m_bits_per_sample == 16);
         ASSERT(m_channels == 2);
 
-        i16 left = input.data()[0] << 8 | input.data()[1];
-        i16 right = input.data()[2] << 8 | input.data()[3];
+        u32 samples_decoded = 0;
 
-        return {
-            -1.0 + 2.0 * (((double)left + 32768.0) / 65535.0),
-            -1.0 + 2.0 * (((double)right + 32768.0) / 65535.0),
-        };
+        while (sample_count--) {
+            i16 left = src[0] << 8 | src[1];
+            i16 right = src[2] << 8 | src[3];
+
+            dst.append(Audio::Sample {
+                -1.0 + 2.0 * (((double)left + 32768.0) / 65535.0),
+                -1.0 + 2.0 * (((double)right + 32768.0) / 65535.0),
+            });
+
+            samples_decoded++;
+            src += 4;
+        }
     }
 };

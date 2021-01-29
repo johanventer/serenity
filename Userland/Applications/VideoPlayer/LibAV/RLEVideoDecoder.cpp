@@ -48,7 +48,6 @@ RefPtr<Gfx::Bitmap> RLEVideoDecoder::decode(Span<const u8> span)
     auto bitmap = m_last_frame->clone();
 
     u32 chunk_size = read_be<u32>(stream) & 0x3FFFFFFF;
-
     if (chunk_size < 8) {
         return bitmap;
     }

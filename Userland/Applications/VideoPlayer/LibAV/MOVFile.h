@@ -47,6 +47,7 @@ public:
     bool has_error() const { return !m_error_string.is_null(); }
     const char* error_string() const { return m_error_string.characters(); }
 
+    // FIXME: All of this stuff should move to a stream abstraction
     Gfx::IntSize frame_size() const;
     u16 depth() const;
     u32 duration() const;
@@ -56,8 +57,8 @@ public:
     u32 audio_samples_per_frame() const;
     u32 audio_sample_size() const;
 
-    RefPtr<Gfx::Bitmap> frame(u32);
-    Vector<Audio::Sample> decode_audio_samples(u32 frame_index);
+    RefPtr<Gfx::Bitmap> decode_frame(u32);
+    Vector<Audio::Sample> decode_audio_samples(u32 first_sample_index, u32 max_samples);
 
 private:
     enum class TrackType {
@@ -98,8 +99,14 @@ private:
 
     struct SampleToChunkEntry {
         u32 first_chunk;
-        u32 chunk_count;
         u32 samples_per_chunk;
+        u32 sample_description_id;
+    };
+
+    struct Chunk {
+        u32 offset;
+        u32 first_sample_index;
+        u32 sample_count;
         u32 sample_description_id;
     };
 
@@ -108,17 +115,15 @@ private:
         u32 duration;
         u32 width;
         u32 height;
-        SampleDescriptionEntry sample_description;
-        Vector<TimeToSampleEntry> time_to_sample_entries;
-        Vector<u32> sync_sample_entries;
-        Vector<SampleToChunkEntry> sample_to_chunk_entries;
-        u32 sample_size;
-        Vector<u32> sample_size_entries;
-        Vector<u32> chunk_offset_entries;
         u32 sample_count;
-        u32 chunk_count;
         u32 time_scale;
-        Vector<u32> first_sample_index_in_chunk;
+        u32 sample_size;
+        SampleDescriptionEntry sample_description;
+        Vector<Chunk> chunks;
+        Vector<TimeToSampleEntry> time_to_sample_entries;
+        Vector<SampleToChunkEntry> sample_to_chunk_entries; // MOVE TO CONTEXT
+        Vector<u32> sync_sample_entries;
+        Vector<u32> sample_size_entries;
     };
 
     bool parse_atom();
@@ -140,13 +145,10 @@ private:
 
     void create_video_decoder();
     void create_audio_decoder();
-    u32 sample_index_at_time(const Track*, u32) const;
-    u32 chunk_index_for_sample(const Track*, u32) const;
-    const SampleToChunkEntry& chunk_entry_for_sample(const Track*, u32) const;
-    u32 offset_for_chunk(const Track*, u32) const;
-    u32 first_sample_in_chunk(const Track*, u32) const;
-    u32 sample_offset_in_chunk(const Track*, u32 chunk, u32 sample) const;
-    u32 size_for_sample(const Track*, u32) const;
+    u32 sample_at_time(const Track*, u32) const;
+
+    const Chunk& chunk_for_sample(const Track&, u32) const;
+    u32 sample_size(const Track&, u32) const;
 
     NonnullRefPtr<MappedFile> m_file;
     OwnPtr<InputMemoryStream> m_stream;
